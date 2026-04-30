@@ -41,7 +41,6 @@ typedef struct
   queue* requestq;
   pthread_mutex_t* queue_lock;
   int* active_files;
-  pthread_mutex_t* counter_lock;
   pthread_cond_t* queue_not_full;
   pthread_cond_t* queue_not_empty;
 } RequesterArgs;
@@ -53,7 +52,6 @@ typedef struct
   FILE* output_file;
   pthread_mutex_t* output_lock;
   int* active_files;
-  pthread_mutex_t* counter_lock;
   pthread_cond_t* queue_not_empty;
   pthread_cond_t* queue_not_full;
 } ResolverArgs;

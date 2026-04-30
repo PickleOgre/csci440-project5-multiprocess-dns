@@ -35,10 +35,10 @@ request_thr(void* arg)
   fclose(args->input_file);
 
   /* Decrement the active files counter */
-  pthread_mutex_lock(args->counter_lock);
+  pthread_mutex_lock(args->queue_lock);
   (*args->active_files)--;
-  pthread_mutex_unlock(args->counter_lock);
   pthread_cond_broadcast(args->queue_not_empty);
+  pthread_mutex_unlock(args->queue_lock);
 
   return NULL;
 }
@@ -54,10 +54,7 @@ resolve_thr(void* arg)
   while (1) {
     while (queue_is_empty(args->requestq)) {
       // Check if we're done before sleeping
-      pthread_mutex_lock(args->counter_lock);
-      int done = (*args->active_files == 0);
-      pthread_mutex_unlock(args->counter_lock);
-      if (done) {
+      if (*args->active_files == 0) {
         pthread_mutex_unlock(args->queue_lock);
         return NULL;
       }
@@ -66,7 +63,6 @@ resolve_thr(void* arg)
     hostname = (char*)queue_pop(args->requestq);
     pthread_cond_signal(args->queue_not_full); // wake a waiting requester
     pthread_mutex_unlock(args->queue_lock);
-
     /* Lookup hostname and get IP string */
     if (dnslookup(hostname, firstipstr, sizeof(firstipstr)) == UTIL_FAILURE) {
       fprintf(stderr, "dnslookup error: %s\n", hostname);
@@ -99,7 +95,6 @@ main(int argc, char* argv[])
   queue requestq;
   pthread_mutex_t queue_lock;
   pthread_mutex_t output_lock;
-  pthread_mutex_t counter_lock;
   pthread_cond_t queue_not_full;
   pthread_cond_t queue_not_empty;
   RequesterArgs requester_args[MAX_INPUT_FILES];
@@ -140,7 +135,6 @@ main(int argc, char* argv[])
   queue_init(&requestq, QUEUE_SIZE);
   pthread_mutex_init(&queue_lock, NULL);
   pthread_mutex_init(&output_lock, NULL);
-  pthread_mutex_init(&counter_lock, NULL);
   pthread_cond_init(&queue_not_full, NULL);
   pthread_cond_init(&queue_not_empty, NULL);
   active_files = num_files;
@@ -152,7 +146,6 @@ main(int argc, char* argv[])
     .output_file = output_file,
     .output_lock = &output_lock,
     .active_files = &active_files,
-    .counter_lock = &counter_lock,
     .queue_not_empty = &queue_not_empty,
     .queue_not_full = &queue_not_full,
   };
@@ -167,7 +160,6 @@ main(int argc, char* argv[])
       .requestq = &requestq,
       .active_files = &active_files,
       .input_file = input_files[i],
-      .counter_lock = &counter_lock,
       .queue_not_full = &queue_not_full,
       .queue_not_empty = &queue_not_empty,
     };
