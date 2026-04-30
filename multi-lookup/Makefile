@@ -37,7 +37,7 @@ pthread-hello.o: pthread-hello.c
 	$(CC) $(CFLAGS) $<
 
 clean:
-	rm -f lookup queueTest pthread-hello multi-lookup results.txt results.csv
+	rm -f lookup queueTest pthread-hello multi-lookup
 	rm -f *.o
 	rm -f *~
 	rm -f results.txt

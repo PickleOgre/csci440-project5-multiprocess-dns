@@ -40,7 +40,6 @@ request_thr(void* arg)
   pthread_mutex_unlock(args->counter_lock);
   pthread_cond_broadcast(args->queue_not_empty);
 
-
   return NULL;
 }
 
@@ -124,7 +123,6 @@ main(int argc, char* argv[])
   struct timeval begin, end;
   gettimeofday(&begin, 0);
 
-
   /* Open the input files and */
   /* create array of file pointers */
   num_files = 0;
@@ -186,15 +184,16 @@ main(int argc, char* argv[])
     pthread_join(resolver_threads[i], NULL);
   }
 
-  
   pthread_cond_destroy(&queue_not_empty);
   pthread_cond_destroy(&queue_not_full);
-  
-  /* Stop timer and print elapsed time */
-  gettimeofday(&end, 0);
-  long seconds = end.tv_sec - begin.tv_sec;
-  long microseconds = end.tv_usec - begin.tv_usec;
-  printf("%ld\n", seconds * 1000000 + microseconds);
+
+  if (TIMER) {
+    /* Check time and print elapsed */
+    gettimeofday(&end, 0);
+    long seconds = end.tv_sec - begin.tv_sec;
+    long microseconds = end.tv_usec - begin.tv_usec;
+    printf("%ld\n", seconds * 1000000 + microseconds);
+  }
   /* Close Output File */
   fclose(output_file);
 
