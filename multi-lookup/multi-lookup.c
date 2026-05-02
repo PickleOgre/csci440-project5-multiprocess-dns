@@ -5,64 +5,163 @@
  * Create Date: 2026/04/15
  * Modify Date: 2026/04/26
  * Description:
- *  This is a threaded implementation of a
+ *  This is a multiprocess implementation of a
  *  bulk DNS lookup program.
  *
  */
 
 #include "multi-lookup.h"
 
-void*
-request_thr(void* arg)
+/* Queue Functions */
+
+int
+queue_init(queue* q, int size)
 {
-  RequesterArgs* args = (RequesterArgs*)arg;
+  int i;
+
+  /* user specified size or default */
+  if (size > 0 && size < QUEUE_MAX_SIZE) {
+    q->maxSize = size;
+  } else {
+    q->maxSize = QUEUE_MAX_SIZE;
+  }
+
+  /* Set array to NULL */
+  for (i = 0; i < q->maxSize; ++i) {
+    q->array[i].has_value = 0;
+  }
+
+  /* setup circular buffer values */
+  q->front = 0;
+  q->rear = 0;
+
+  return q->maxSize;
+}
+
+int
+queue_is_empty(queue* q)
+{
+  if ((q->front == q->rear) && (q->array[q->front].has_value == 0)) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+int
+queue_is_full(queue* q)
+{
+  if ((q->front == q->rear) && (q->array[q->front].has_value != 0)) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+int
+queue_pop(queue* q, char* destination)
+{
+  if (queue_is_empty(q)) {
+    return 1;
+  }
+
+  strncpy(destination, q->array[q->front].payload, MAX_NAME_LENGTH);
+  q->array[q->front].has_value = 0;
+  q->front = ((q->front + 1) % q->maxSize);
+
+  return 0;
+}
+
+int
+queue_push(queue* q, char* new_payload)
+{
+
+  if (queue_is_full(q)) {
+    return QUEUE_FAILURE;
+  }
+
+  strncpy(q->array[q->rear].payload, new_payload, MAX_NAME_LENGTH);
+  q->array[q->rear].has_value = 1;
+  q->rear = ((q->rear + 1) % q->maxSize);
+
+  return QUEUE_SUCCESS;
+}
+
+/* Multiproc Functions */
+
+int
+init_shared(shared_t* shared, int num_files, FILE* output_file)
+{
+  queue_init(&shared->requestq, QUEUE_SIZE);
+  shared->active_files = num_files;
+  shared->output_file = output_file;
+
+  pthread_mutexattr_t m_attr;
+  pthread_mutexattr_init(&m_attr);
+  pthread_mutexattr_setpshared(&m_attr, PTHREAD_PROCESS_SHARED);
+  pthread_mutex_init(&shared->queue_lock, &m_attr);
+  pthread_mutex_init(&shared->output_lock, &m_attr);
+  pthread_mutexattr_destroy(&m_attr);
+
+  pthread_condattr_t c_attr;
+  pthread_condattr_init(&c_attr);
+  pthread_condattr_setpshared(&c_attr, PTHREAD_PROCESS_SHARED);
+  pthread_cond_init(&shared->queue_not_full, &c_attr);
+  pthread_cond_init(&shared->queue_not_empty, &c_attr);
+  pthread_condattr_destroy(&c_attr);
+
+  return 0;
+}
+
+int
+request_proc(shared_t* shared, FILE* input_file)
+{
   char hostname[MAX_NAME_LENGTH];
 
   /* Loop through file and push names to queue */
-  while (fscanf(args->input_file, INPUTFS, hostname) != EOF) {
-    pthread_mutex_lock(args->queue_lock);
-    while (queue_is_full(args->requestq)) {
-      pthread_cond_wait(args->queue_not_full, args->queue_lock);
+  while (fscanf(input_file, INPUTFS, hostname) != EOF) {
+    pthread_mutex_lock(&shared->queue_lock);
+    while (queue_is_full(&shared->requestq)) {
+      pthread_cond_wait(&shared->queue_not_full, &shared->queue_lock);
     }
-    char* hostname_heap = malloc(MAX_NAME_LENGTH);
-    strncpy(hostname_heap, hostname, MAX_NAME_LENGTH);
-    queue_push(args->requestq, hostname_heap);
-    pthread_cond_signal(args->queue_not_empty);
-    pthread_mutex_unlock(args->queue_lock);
+
+    queue_push(&shared->requestq, hostname);
+
+    pthread_cond_signal(&shared->queue_not_empty);
+    pthread_mutex_unlock(&shared->queue_lock);
   }
 
   /* All lines read -> close file */
-  fclose(args->input_file);
+  fclose(input_file);
 
   /* Decrement the active files counter */
-  pthread_mutex_lock(args->queue_lock);
-  (*args->active_files)--;
-  pthread_cond_broadcast(args->queue_not_empty);
-  pthread_mutex_unlock(args->queue_lock);
+  pthread_mutex_lock(&shared->queue_lock);
+  (shared->active_files)--;
+  pthread_cond_broadcast(&shared->queue_not_empty);
+  pthread_mutex_unlock(&shared->queue_lock);
 
-  return NULL;
+  return 0;
 }
 
-void*
-resolve_thr(void* arg)
+int
+resolve_proc(shared_t* shared)
 {
-  ResolverArgs* args = (ResolverArgs*)arg;
-  char* hostname;
+  char hostname[MAX_NAME_LENGTH];
   char firstipstr[INET6_ADDRSTRLEN];
 
-  pthread_mutex_lock(args->queue_lock);
+  pthread_mutex_lock(&shared->queue_lock);
   while (1) {
-    while (queue_is_empty(args->requestq)) {
+    while (queue_is_empty(&shared->requestq)) {
       // Check if we're done before sleeping
-      if (*args->active_files == 0) {
-        pthread_mutex_unlock(args->queue_lock);
-        return NULL;
+      if (shared->active_files == 0) {
+        pthread_mutex_unlock(&shared->queue_lock);
+        return 0;
       }
-      pthread_cond_wait(args->queue_not_empty, args->queue_lock);
+      pthread_cond_wait(&shared->queue_not_empty, &shared->queue_lock);
     }
-    hostname = (char*)queue_pop(args->requestq);
-    pthread_cond_signal(args->queue_not_full); // wake a waiting requester
-    pthread_mutex_unlock(args->queue_lock);
+    if (queue_pop(&shared->requestq, hostname)) fprintf(stderr, "queue pop error: %s\n", hostname);
+    pthread_cond_signal(&shared->queue_not_full); // wake a waiting requester
+    pthread_mutex_unlock(&shared->queue_lock);
     /* Lookup hostname and get IP string */
     if (dnslookup(hostname, firstipstr, sizeof(firstipstr)) == UTIL_FAILURE) {
       fprintf(stderr, "dnslookup error: %s\n", hostname);
@@ -70,34 +169,26 @@ resolve_thr(void* arg)
     }
 
     /* Write to Output File */
-    pthread_mutex_lock(args->output_lock);
-    fprintf(args->output_file, "%s,%s\n", hostname, firstipstr);
-    pthread_mutex_unlock(args->output_lock);
+    pthread_mutex_lock(&shared->output_lock);
+    fprintf(shared->output_file, "%s, %s\n", hostname, firstipstr);
+    fflush(shared->output_file);
+    if (DEBUG) fprintf(stderr, "%s, %s\n", hostname, firstipstr);
+    pthread_mutex_unlock(&shared->output_lock);
 
-    /* free the hostname buffer */
-    free(hostname);
-
-    pthread_mutex_lock(args->queue_lock); // re-acquire for next iteration
+    pthread_mutex_lock(&shared->queue_lock); // re-acquire for next iteration
   }
-  return NULL;
+  return 1;
 }
+
+/* Main Function */
 
 int
 main(int argc, char* argv[])
 {
   FILE* input_files[MAX_INPUT_FILES];
   FILE* output_file = NULL;
-  int num_files;    // The number of name files
-  int active_files; // The number of uncompleted name files
+  int num_files; // The number of name files
   char errorstr[SBUFSIZE];
-  pthread_t requester_threads[MAX_INPUT_FILES];
-  pthread_t resolver_threads[NUM_RESOLVER_THREADS];
-  queue requestq;
-  pthread_mutex_t queue_lock;
-  pthread_mutex_t output_lock;
-  pthread_cond_t queue_not_full;
-  pthread_cond_t queue_not_empty;
-  RequesterArgs requester_args[MAX_INPUT_FILES];
   int i;
 
   /* Check Arguments */
@@ -132,52 +223,47 @@ main(int argc, char* argv[])
   }
 
   /* Initialize shared state */
-  queue_init(&requestq, QUEUE_SIZE);
-  pthread_mutex_init(&queue_lock, NULL);
-  pthread_mutex_init(&output_lock, NULL);
-  pthread_cond_init(&queue_not_full, NULL);
-  pthread_cond_init(&queue_not_empty, NULL);
-  active_files = num_files;
+  shared_t* shared = mmap(NULL,
+                          sizeof(shared_t),
+                          PROT_READ | PROT_WRITE,
+                          MAP_SHARED | MAP_ANONYMOUS,
+                          -1,
+                          0);
 
-  /* Spawn resolver thread pool */
-  ResolverArgs resolver_arg = {
-    .requestq = &requestq,
-    .queue_lock = &queue_lock,
-    .output_file = output_file,
-    .output_lock = &output_lock,
-    .active_files = &active_files,
-    .queue_not_empty = &queue_not_empty,
-    .queue_not_full = &queue_not_full,
-  };
-  for (i = 0; i < NUM_RESOLVER_THREADS; i++) {
-    pthread_create(&resolver_threads[i], NULL, resolve_thr, &resolver_arg);
+  init_shared(shared, num_files, output_file);
+
+  /* Spawn resolver process pool */
+  for (i = 0; i < NUM_RESOLVER_PROCS; i++) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      if (resolve_proc(shared)) fprintf(stderr, "resolver error: %d", i);
+      exit(0);
+    } else if (pid < 0) {
+      perror("Error while forking resolver");
+      exit(1);
+    }
   }
 
-  /* Spawn requester thread pool */
+  /* Spawn requester process pool */
   for (i = 0; i < num_files; i++) {
-    requester_args[i] = (RequesterArgs){
-      .queue_lock = &queue_lock,
-      .requestq = &requestq,
-      .active_files = &active_files,
-      .input_file = input_files[i],
-      .queue_not_full = &queue_not_full,
-      .queue_not_empty = &queue_not_empty,
-    };
-
-    pthread_create(
-      &requester_threads[i], NULL, request_thr, &requester_args[i]);
+    pid_t pid = fork();
+    if (pid == 0) {
+      request_proc(shared, input_files[i]);
+      exit(0);
+    } else if (pid < 0) {
+      perror("Error while forking requester");
+      exit(1);
+    }
   }
 
-  /* Join all threads */
-  for (i = 0; i < num_files; i++) {
-    pthread_join(requester_threads[i], NULL);
-  }
-  for (i = 0; i < NUM_RESOLVER_THREADS; i++) {
-    pthread_join(resolver_threads[i], NULL);
-  }
+  /* Wait for all processes to finish */
+  pid_t wpid;
+  while ((wpid = wait(NULL)) > 0);
 
-  pthread_cond_destroy(&queue_not_empty);
-  pthread_cond_destroy(&queue_not_full);
+  pthread_mutex_destroy(&shared->output_lock);
+  pthread_mutex_destroy(&shared->queue_lock);
+  pthread_cond_destroy(&shared->queue_not_empty);
+  pthread_cond_destroy(&shared->queue_not_full);
 
   if (TIMER) {
     /* Check time and print elapsed */
@@ -186,11 +272,12 @@ main(int argc, char* argv[])
     long microseconds = end.tv_usec - begin.tv_usec;
     printf("%ld\n", seconds * 1000000 + microseconds);
   }
+
   /* Close Output File */
   fclose(output_file);
 
-  /* Free queue memory */
-  queue_cleanup(&requestq);
+  /* Free shared memory */
+  munmap(shared, sizeof(shared_t));
 
   return EXIT_SUCCESS;
 }
