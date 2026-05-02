@@ -28,7 +28,7 @@
 #define DEBUG 0
 #define MINARGS 3
 #define TIMER 1
-#define USAGE "<inputFilePath> <outputFilePath>"
+#define USAGE "<inputFilePath1 ... inputFilePathN> <outputFilePath>"
 #define SBUFSIZE 1025
 #define INPUTFS "%1024s"
 #define QUEUE_SIZE 10
